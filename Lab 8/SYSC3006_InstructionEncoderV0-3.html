@@ -1,0 +1,606 @@
+<!DOCTYPE HTML>
+
+<!-- Version 0.3  
+  Version 0.1 used a table for building instruction data
+  Version 0.2 replaced table with div's
+							added global state while building current instruction
+  Version 0.3 tidied code
+-->
+
+<html>
+<head>
+<meta charset="UTF-8"> 
+<title>SYSC 3006 Instruction Encoder</title>
+
+<script language="JavaScript" type="text/javascript">
+
+var iObj = { // general data on instructions
+		ADD: { iType:"ALU", operands:3, forms:2, fArray: { 0:1,1:4 }, opCodeArray: { 0:"01",1:"21" } },
+		AND: { iType:"ALU", operands:3, forms:2, fArray: { 0:1,1:4 }, opCodeArray: { 0:"04",1:"24" } },
+		// B & BL really have 1 operand, but using 2 to manage display in Operand Selection Table
+		Bcc: { iType:"BRA", operands:2, forms:1, fArray: { 0:6 }, opCodeArray: { 0:"80" } },
+		BLcc: { iType:"BRA", operands:2, forms:1, fArray: { 0:6 }, opCodeArray: { 0:"83" } },
+		CMN: { iType:"ALU2", operands:2, forms:1, fArray: { 0:5 }, opCodeArray: { 0:"51" } },
+		CMP: { iType:"ALU", operands:2, forms:2, fArray: { 0:2, 1:5 }, opCodeArray: { 0:"47",1:"57" } },
+		// LDR really has 3 operands, but using 2 to manage operand display 
+		LDR: { iType:"MEM", operands:2, forms:4, fArray: { 0:2,1:4,2:1,3:5 }, opCodeArray: { 0:"30",1:"31",2:"32",3:"33" } },
+		MOV: { iType:"ALU", operands:2, forms:2, fArray: { 0:2,1:5 }, opCodeArray: { 0:"03",1:"23" } },
+		NOP: { iType:"ALU", operands:0, forms:1, fArray: { 0:3 }, opCodeArray: { 0:"00" } },
+		NOT: { iType:"ALU3", operands:2, forms:1, fArray: { 0:2 }, opCodeArray: { 0:"07" } },
+		MVN: { iType:"ALU2", operands:2, forms:1, fArray: { 0:5 }, opCodeArray: { 0:"27" } },
+		OR:  { iType:"ALU", operands:3, forms:2, fArray: { 0:1,1:4 }, opCodeArray: { 0:"05",1:"25" } },
+		POP: { iType:"MEM1", operands:1, forms:1, fArray: { 0:7 }, opCodeArray: { 0:"39" } },
+		PUSH: { iType:"MEM1", operands:1, forms:1, fArray: { 0:7 }, opCodeArray: { 0:"38" } },
+		// STR really has 3 operands, but using 2 to manage operand display
+		STR: { iType:"MEM", operands:2, forms:4, fArray: { 0:2,1:4,2:1,3:5 }, opCodeArray: { 0:"34",1:"35",2:"36",3:"37" } },
+		SUB: { iType:"ALU", operands:3, forms:2, fArray: { 0:1,1:4 }, opCodeArray: { 0:"02",1:"22" } },
+		XOR: { iType:"ALU", operands:3, forms:2, fArray: { 0:1,1:4 }, opCodeArray: { 0:"06",1:"26" } },
+		 };
+
+var opHeaders = { // headers to display in divs, keyed by iType and operands
+		"ALU": { 2:{ 0:"Dest Reg", 1:"Variable" }, 3:{ 0:"Dest Reg", 1:"Source Reg", 2:"Variable" } },
+		"ALU2": { 2:{ 0:"Dest Reg", 1:"Imm" } },
+		"ALU3": { 2:{ 0:"Dest Reg", 1:"Source Reg" } },
+		"BRA": { 2:{ 0:"Condition", 1:"Target" } },
+		"MEM": { 2:{ 0:"Reg", 1:"[ Memory Operand ]<br>Opcode: " } },
+		"MEM1": { 1:{ 0:"Register List<br>{ }" } }
+		};
+
+// Global state used while building Instruction
+var iEncoding;				// DOM: instruction encoding paragraph
+var initialEncoding = "Encoding: --------"; // used to initialize instruction encoding
+var iPick; 						// DOM: iPicker div
+var curInstruction = "";  // current instruction
+var curOpCode;	 			// opcode of current instruction
+var iMnem;					// DOM: instruction mnemonic paragraph
+var iOpersDiv = new Array(); // DOM: divs containing operands
+var iOpersHeading = new Array(); // DOM: paragraphs containing operand headings
+var iOpersReg = new Array(); // DOM: selects for register operands 
+var iOpersImm = { // array for managing inputs for immediate operands 
+				1: { iTable:0, decRadio:0, decText:0, hexRadio:0, hexText:0 }, 
+				2: { iTable:0, decRadio:0, decText:0, hexRadio:0, hexText:0 } 
+		}; 
+var iCC;	 	 			// DOM: cc select
+var iTarget = { iTable:0, PCText:0, targetText:0 }
+var op1Single = true;   	// sometimes op1 will allow multiple selections (false)	 
+var iMultipleHelp;		// DOM: paragraph for help with register lists
+var iRegImmText;			// DOM: a hidden reg/imm button input ... copied as an "iOpersHeading" as needed
+var varOper;					// variable operand index (-1 = no variable operand) ... use with iOpersReg and iOpersImm arrays
+var maxImm = { 1:0xFFFFF, 2:0xFFFF };  // maximum values for immediate operands
+var iMemOpTable;		// DOM:  table containing memory operand addressing radio buttons
+var iMemRegRadio;		// DOM: default memory operand radio selection
+
+function initEncoder()
+{  // build instruction picker from iObj data
+// done dynamically to avoid modifying code when new instructions added
+  iPick = document.getElementById("iPicker");
+	var pickerSize = 0;
+	for(key in iObj) 
+	{ var opt = document.createElement("option");
+	  opt.text = key;
+  	iPick.add(opt, iPick.options[null] );
+  	pickerSize++;
+	}
+	iPick.size=pickerSize;
+	iPick.selectedIndex = -1;
+
+// set up instruction building area
+// most of set up is to make execution faster by pre-determining access to DOM elements (?)
+	iEncoding = document.getElementById("iCode");   
+    iRegImmText = document.getElementById("regImmButtons");  // dummy reg/imm button text paragraph
+
+  // instruction mnemonic paragraph
+	iMnem = document.getElementById("iMnemonic");
+	iMnem.innerHTML = "Pick an instruction";
+	// divs for operands 
+	iOpersDiv[0] = document.getElementById("iOp1");
+	iOpersDiv[1] = document.getElementById("iOp2");
+	iOpersDiv[2] = document.getElementById("iOp3");
+	// header paragraph in operand divs
+	iOpersHeading[0] = document.getElementById("iOp1P");
+	iOpersHeading[1] = document.getElementById("iOp2P");
+	iOpersHeading[2] = document.getElementById("iOp3P");
+	// selects for register operands in operand divs
+	iOpersReg[0] = document.getElementById("iOp1RegSelect");
+	iOpersReg[1] = document.getElementById("iOp2RegSelect");
+	iOpersReg[2] = document.getElementById("iOp3RegSelect");
+	iOpersReg[3] = document.getElementById("iOp4RegSelect"); // ONLY used in MEM offset register mode
+	// cc select
+	iCC = document.getElementById("iOp1ccSelect");
+	// PC-Relative target table
+	iTarget.iTable = document.getElementById("targetTable");
+	iTarget.PCText = document.getElementById("PCText");
+	iTarget.targetText = document.getElementById("targetText");
+	// immediate data operands
+	for ( t = 1; t < 3; t++ )
+	{  iOpersImm[t].iTable = document.getElementById("immTable"+t);
+	   iOpersImm[t].decRadio = document.getElementById("immDec"+t);
+	   iOpersImm[t].decText = document.getElementById("decText"+t);
+	   iOpersImm[t].hexRadio = document.getElementById("immHex"+t);
+	   iOpersImm[t].hexText = document.getElementById("hexText"+t);
+	}
+	iMultipleHelp = document.getElementById("multipleHelp");
+	iMemOpTable = document.getElementById("memOpTable");
+	iMemRegRadio = document.getElementById("memReg");
+}
+
+function clearOldInstruction()
+{  	// clear previous contents
+	for ( old = 0; old < 3; old++ )
+	{   iOpersHeading[old].innerHTML="";
+		iOpersDiv[old].style.display="none";
+		iOpersReg[old].style.display="none";
+		iOpersReg[old].selectedIndex = -1;
+		iOpersReg[old].multiple = false;
+		if ( old != 0 )
+		{ iOpersImm[old].decRadio.checked = "true";
+		  iOpersImm[old].iTable.style.display="none";
+		  iOpersImm[old].decText.value = "";
+		  iOpersImm[old].hexText.value = "";
+		}
+	}
+	op1Single = true;
+	varOper = -1; // default to no variable field
+	iCC.style.display="none";
+	iCC.selectedIndex = -1;
+	iTarget.iTable.style.display="none";
+	iTarget.PCText.value="";
+	iTarget.targetText.value="";
+	iMultipleHelp.style.display="none";
+	iMemOpTable.style.display="none";
+	iOpersReg[3].style.display="none";
+	iMemRegRadio.checked="true";
+}
+
+function insertEncoding( encodeStr, opCodeStr )
+{	// puts opcode into instruction encoding
+	return encodeStr.substr(0,10) + opCodeStr + encodeStr.substr(12,6);
+}
+
+function doInstruction()
+{  clearOldInstruction();	
+  // setup current instruction
+  var fixedOpCode = true;   // initially, assume instruction has only one form and one opcode
+  curInstruction = iPick.options[iPick.selectedIndex].text;
+  iMnem.innerHTML = curInstruction;
+  curOpCode = iObj[curInstruction].opCodeArray[0];
+	iEncoding.innerHTML = insertEncoding( initialEncoding, curOpCode);
+
+  for ( var k = 0; k < iObj[curInstruction].operands; k++ )
+  {  // insert operand header
+		 if ( ( (opHeaders[iObj[curInstruction].iType])[iObj[curInstruction].operands] )[k] == "Variable" )
+		 { // have Reg/Imm option ... default to Reg, and Reg-form opcode
+		   iOpersHeading[k].innerHTML = iRegImmText.innerHTML + "<br>Opcode: "+ curOpCode;
+		   varOper = k;
+		   fixedOpCode = false;	 
+		 }
+		 else if ( ( k == 1) && (iObj[curInstruction].iType == "MEM" ) )
+		 { // default to Reg addressing mode for memory operand
+		   iOpersHeading[k].innerHTML = ((opHeaders[iObj[curInstruction].iType])[iObj[curInstruction].operands])[k] + curOpCode;
+		   fixedOpCode = false;	 
+		 }
+		 else
+		 { iOpersHeading[k].innerHTML = ((opHeaders[iObj[curInstruction].iType])[iObj[curInstruction].operands])[k];
+	     }
+		 // insert operand selector
+		 switch ( k )
+		 {  case 0: // operand 1
+		 		switch( iObj[curInstruction].iType )
+				{  	case "BRA":
+						iCC.style.display="inline";
+						break;
+					case "MEM1":  //POP, PUSH
+   		 			 	iOpersReg[0].multiple = true;
+						op1Single = false;
+						iMultipleHelp.style.display="inline";
+					default:
+	   		 			 iOpersReg[k].style.display="inline";
+				}	 
+				break;
+			case 1: // operand 2
+		 		switch( iObj[curInstruction].iType )
+				{  	case "ALU":
+		   				iOpersReg[k].style.display="inline";
+			 			break;
+   					case "ALU2":
+						iOpersImm[k].iTable.style.display="inline";
+						break;
+					case "ALU3":
+		   		 		iOpersReg[k].style.display="inline";
+			 			break;
+   					case "MEM":
+						iMemOpTable.style.display="inline";
+		   		 		iOpersReg[k].style.display="inline";
+		   				break;
+   					case "BRA":
+		   				iTarget.iTable.style.display="inline";
+						break;
+					default:
+				}
+				break;
+			case 2: // operand 3
+		 		switch( iObj[curInstruction].iType )
+				{  	case "ALU":
+		   		 		iOpersReg[k].style.display="inline";
+			 			break;
+				}
+				break;
+		}
+		iOpersDiv[k].style.display="block";
+  }
+  // if only one instruction form and one opcode, add opcode to instruction mnemonic
+  if ( fixedOpCode )
+  {  iMnem.innerHTML += "<br>Opcode: " + curOpCode;
+  }
+	//  add any required 0-padding to instruction encoding
+	switch ( iObj[curInstruction].operands )
+	{  case 0:  // NOP
+		   iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 12 ) + "000000"; 
+	     break;
+	   case 1:  // PUSH and POP
+		   iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 12 ) + "000000"; 
+			 break;
+		 case 2: // ALU, ALU3, MEM(LDR,STR)
+		   if ( ( iObj[curInstruction].iType != "ALU2") && 
+			      ( iObj[curInstruction].iType != "BRA") )
+			 {  iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 14 ) + "0000"; 
+			 }
+			 break;
+		 case 3:
+			 iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 15 ) + "000"; 
+			 break;
+	}
+}
+
+function opccSelected()
+{ // called when cc is selected
+	iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 12 ) 
+			+ iCC.value + iEncoding.innerHTML.substring( 13 );
+}
+
+function opRegSelected( opIndex, single)
+{  // called when a register is selected as an operand
+	 // opIndex = index of operand in globals
+	 // single = true iff selector set for single (vs. multiple) selection
+  if ( single )
+	{ // put selected register in instruction encoding
+	// must handle offset register memory operand as special case ... opIndex = 3
+	  if ( opIndex != 3 )
+	  {	iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 12 + opIndex) 
+				+ iOpersReg[opIndex].value + iEncoding.innerHTML.substring( 12 + opIndex + 1);
+	  }
+	  else  // special case!
+	  {	iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 11 + opIndex) 
+				+ iOpersReg[opIndex].value + iEncoding.innerHTML.substring( 11 + opIndex + 1);
+	  }
+	}
+	else // register list ... only in operand 0
+	{ // loop to get all selected options
+		var regList = "{ ";  // list (string) of registers selected
+		var commaPad = "";     // add a "," before all but first reg entered in RegList
+		var regMask = 0;   // binary mask for PUSH/POP
+		for (var opt = 0; opt < 16; opt ++ )
+		{  	if ( iOpersReg[opIndex].options[opt].selected )
+			{ regList += commaPad + iOpersReg[opIndex].options[opt].text;
+			  commaPad = ", ";
+			  regMask = regMask | Math.pow(2,opt);
+			}
+		}
+		regList += " }";
+		iOpersHeading[opIndex].innerHTML = iOpersHeading[opIndex].innerHTML.substring(0,17) + regList;
+		regMask = regMask.toString(16);
+		while ( regMask.length < 4 )
+		{  regMask = "0" + regMask;
+		}
+		iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 14) + regMask.toUpperCase();
+	}
+}
+
+function regRadio( )
+{  // occurs in varOper operand index
+  iOpersReg[varOper].style.display="inline";
+	iOpersImm[varOper].iTable.style.display="none";
+	// update opcode
+	curOpCode = iObj[curInstruction].opCodeArray[0];
+	iOpersHeading[varOper].innerHTML = iOpersHeading[varOper].innerHTML.substr(0, iOpersHeading[varOper].innerHTML.indexOf(":") +2) + curOpCode;
+	iEncoding.innerHTML = insertEncoding( iEncoding.innerHTML, curOpCode);
+	// pad encoding with 0's
+	iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 13 + varOper ) + ("00000").substring(varOper);
+	// clear any previous selection
+	iOpersReg[varOper].selectedIndex = -1;
+}
+
+function immRadio( )
+{  // occurs in varOper operand index
+  iOpersReg[varOper].style.display="none";
+	iOpersImm[varOper].iTable.style.display="inline";
+	iOpersImm[varOper].decText.focus();
+	// update opcode
+	curOpCode = iObj[curInstruction].opCodeArray[1];
+	iOpersHeading[varOper].innerHTML = iOpersHeading[varOper].innerHTML.substr(0, iOpersHeading[varOper].innerHTML.indexOf(":") +2) + curOpCode;
+	iEncoding.innerHTML = insertEncoding( iEncoding.innerHTML, curOpCode);
+	// pad encoding with -'s
+	iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 12 + varOper ) + ("------").substring(varOper);
+	// select Imm radio button
+	(iOpersHeading[varOper].getElementsByTagName('input'))[1].checked = "true";
+	
+}
+
+function immDecData( opIndex )
+{  // occurs in opIndex operand index
+	iOpersImm[opIndex].decText.value="";
+	iOpersImm[opIndex].decText.style.display="inline";
+	iOpersImm[opIndex].decText.focus();
+	iOpersImm[opIndex].hexText.style.display="none";
+}
+
+function immHexData( opIndex )
+{  // occurs in opIndex operand index
+	iOpersImm[opIndex].decText.style.display="none";
+	iOpersImm[opIndex].hexText.value="";
+	iOpersImm[opIndex].hexText.style.display="inline";
+	iOpersImm[opIndex].hexText.focus();
+}
+
+function decOK( decStr )
+{  // return true iff decStr is a non-empty string of decimal digits 
+  return /^[0-9]+$/i.test( decStr ); 
+}
+
+function hexOK( hexStr )
+{  // return true iff hexStr is a non-empty string of hexadecimal digits (case insensitive)
+  return /^([0-9]|[A-F])+$/i.test( hexStr ); 
+}
+
+function encodeImm( opIndex )
+{  // occurs in opIndex operand index
+   // get the entered data
+   var immNum;
+   if ( (iOpersImm[opIndex].iTable.getElementsByTagName('input'))[0].checked )
+   {  // dealing with decimal 
+	  if ( !(decOK( iOpersImm[opIndex].decText.value.trim() ) ) )
+	  { alert( "Invalid unsigned decimal immediate value");
+		return;
+	  }
+	  immNum = parseInt( iOpersImm[opIndex].decText.value.trim() );
+   }
+   else  // dealing with hexadecimal
+   {  if ( !(hexOK( iOpersImm[opIndex].hexText.value.trim() ) ) )
+	  { alert( "Invalid hexadecimal immediate value");
+		return;
+	  }
+	  immNum = parseInt( iOpersImm[opIndex].hexText.value.trim(), 16 );
+   }
+  if ( maxImm[opIndex] < immNum  )
+  {  alert( "Target out of range" );
+	 return;
+  }
+  // convert immediate value to hex string, pad if necessary, and put into instruction encoding
+  immNum = (immNum & maxImm[opIndex]).toString(16);
+  var memAdjust = 0; // need smaller immediate value if in MEM instruction
+  if ( iObj[curInstruction].iType == "MEM" )
+  {  memAdjust = 1;
+  }
+  while ( immNum.length < (6 - opIndex - memAdjust) )
+  { immNum = "0" + immNum;
+  }
+  iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 12 + opIndex + memAdjust ) + immNum.toUpperCase();
+}
+
+
+function encodeTarget( )
+{ // validate input data
+	if ( !( hexOK( iTarget.PCText.value.trim() ) ) )
+	{ // data error
+	  alert("PC must have a valid hexadecimal value");
+		return;
+	}
+	if ( !( hexOK( iTarget.targetText.value.trim() ) ) )
+	{ // data error
+	  alert("Target must have a valid hexadecimal value");
+		return;
+	}
+  // calculate Target - PC
+  var offset = parseInt( iTarget.targetText.value.trim(), 16 ) - parseInt( iTarget.PCText.value.trim(), 16 );
+  if ( ( offset < -(0x80000) ) || ( (0x7ffff) < offset ) )
+  {  alert( "Target out of range" );
+	 return;
+  }
+  // truncate and put into instruction encoding
+  offset = (offset & 0xFFFFF).toString(16);
+  while (offset.length < 5 )
+  {  offset = "0" + offset;
+  }
+  
+  iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 13 ) + offset.toUpperCase();
+} 
+
+
+function memOperand( memIndex )
+{  // update opcode
+	curOpCode = iObj[curInstruction].opCodeArray[memIndex];
+	iOpersHeading[1].innerHTML = iOpersHeading[1].innerHTML.substr(0, iOpersHeading[1].innerHTML.indexOf(":") +2) + curOpCode;
+	iEncoding.innerHTML = insertEncoding( iEncoding.innerHTML, curOpCode);
+	switch ( memIndex )
+	{ case 0:
+		iOpersReg[1].style.display="inline";
+		iOpersReg[1].selectedIndex = -1;
+		iOpersReg[3].style.display="none";
+		iOpersImm[1].iTable.style.display="none";
+		iTarget.iTable.style.display = "none";
+		// pad encoding -'s & 0's as need
+		iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 13 ) + "-0000";
+		break;
+	  case 1:
+		iOpersReg[1].style.display="inline";
+		iOpersReg[1].selectedIndex = -1;
+		iOpersReg[3].style.display="none";
+		iTarget.iTable.style.display = "none";
+		iOpersImm[1].iTable.style.display="inline";
+		(iOpersImm[1].iTable.getElementsByTagName('input'))[0].checked = "true"; 		
+		iOpersImm[1].decText.value = "";
+		iOpersImm[1].decText.style.display = "inline";
+		iOpersImm[1].hexText.style.display = "none";
+		// pad encoding -'s & 0's as need
+		iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 13 ) + "-----";
+		break;	
+	  case 2:
+		iOpersReg[1].style.display="inline";
+		iOpersReg[1].selectedIndex = -1;
+		iOpersReg[3].style.display="inline";
+		iOpersReg[3].selectedIndex = -1;
+		iOpersImm[1].iTable.style.display="none";
+		iTarget.iTable.style.display = "none";
+		// pad encoding -'s & 0's as need
+		iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 13 ) + "--000";
+		break;	
+	  case 3:
+		iOpersReg[1].style.display="none";
+		iOpersReg[3].style.display="none";
+		iOpersImm[1].iTable.style.display="none";
+		iTarget.iTable.style.display = "inline";
+		iTarget.PCText.value = "";
+		iTarget.targetText.value = "";
+		// pad encoding -'s & 0's as need
+		iEncoding.innerHTML = iEncoding.innerHTML.substring( 0, 13 ) + "-----";
+		break;	
+	}
+}
+
+</script>
+
+</head>
+<body>
+
+<div style="display:none">
+<p id="regImmButtons">
+<input type = "radio" name = "varOp" id = "regOp" value = "0" checked="true"
+onclick="regRadio()" />
+ <label for = "regOp">Reg</label>
+<input type = "radio" name = "varOp" id = "immOp" value = "1" 
+onclick="immRadio()" />
+ <label for = "immOp">Imm</label>		
+</p>
+</div>
+
+<fieldset style="margin-left:20px;margin-right:20px;float:left;">
+<legend>SYSC 3006 Instruction Encoder  (v0.3)</legend>
+
+<div id="iEncodeDiv" style="text-align:center;border:1px solid red;margin-left:20px;margin-bottom:20px;">
+<p id="iCode" style="margin-left:20px;margin-bottom:20px;">Encoding:   --------</p>
+</div>
+
+<div id="iContentDiv" style="text-align:center;border:1px solid red;margin-left:20px;margin-bottom:20px;float:left;">
+
+<div id ="iPickDiv" style="margin-left:20px;margin-right:20px;float:left;">
+
+<p id="iMnemonic" style="text-align:center;">
+</p>
+<select id="iPicker" onChange="doInstruction()" style="margin-left:0px;">
+</select>
+<!-- </form>  -->
+</div>
+
+<div id="iOp1" style="margin-left:20px;margin-right:20px;float:left;display:none">
+<p id="iOp1P" style="text-align:center;margin-left:20px;margin-right:20px">Operand 1</p>
+<form id="op1Select" > 
+<select id="iOp1RegSelect" onChange="opRegSelected( 0, op1Single )" size=16 style="display:none" >
+<option value="0">R0</option> <option value="1">R1</option> <option value="2">R2</option> 
+<option value="3">R3</option> <option value="4">R4</option> <option value="5">R5</option> 
+<option value="6">R6</option> <option value="7">R7</option> <option value="8">R8</option> 
+<option value="9">R9</option> <option value="A">R10</option> <option value="B">R11</option> 
+<option value="C">R12</option> <option value="D">R13</option> <option value="E">R14</option> 
+<option value="F">R15</option> 
+</select>
+<select id="iOp1ccSelect" onChange="opccSelected()" size=15 style="display:none" >
+<option value="1">EQ</option> <option value="2">NE</option> <option value="3">HS</option> 
+<option value="4">LO</option> <option value="5">MI</option> <option value="6">PL</option> 
+<option value="7">VS</option> <option value="8">VC</option> <option value="9">HI</option> 
+<option value="A">LS</option> <option value="B">GE</option> <option value="C">LT</option> 
+<option value="D">GT</option> <option value="E">LE</option> <option value="F">AL</option> 
+</select>
+</form>
+<p id="multipleHelp" style="display:none">Hold Ctrl to<br>select multiple</p>
+</div>
+
+<div id="iOp2" style="margin-left:20px;margin-right:20px;float:left;display:none">
+<p id="iOp2P" style="text-align:center;margin-left:20px;margin-right:20px;text-align:center">Operand 2</p>
+<table id="memOpTable" style="display:none">
+<tr><td><input type = "radio" name = "memOps" id = "memReg" value = "0" 
+ onclick="memOperand(0)" checked = "checked" /><label for = "memReg">Register</label></td></tr>
+<tr><td><input type = "radio" name = "memOps" id = "offsImm" value = "1" 
+ onclick="memOperand(1)" /><label for = "offsImm">Offs Imm</label></td></tr>
+<tr><td><input type = "radio" name = "memOps" id = "offsReg" value = "2" 
+ onclick="memOperand(2)" /><label for = "offsReg">Offs Reg</label></td></tr> 
+ <tr><td><input type = "radio" name = "memOps" id = "pcRel" value = "3" 
+ onclick="memOperand(3)" /><label for = "pcRel">PC-Rel</label></td></tr>
+</table>
+<form id="op2Select" > 
+<select id="iOp2RegSelect" onChange="opRegSelected( 1, true )" size=16 style="display:none;float:none" >
+<option value="0">R0</option> <option value="1">R1</option> <option value="2">R2</option> 
+<option value="3">R3</option> <option value="4">R4</option> <option value="5">R5</option> 
+<option value="6">R6</option> <option value="7">R7</option> <option value="8">R8</option> 
+<option value="9">R9</option> <option value="A">R10</option> <option value="B">R11</option> 
+<option value="C">R12</option> <option value="D">R13</option> <option value="E">R14</option> 
+<option value="F">R15</option> 
+</select>
+<table id="immTable1" style="vertical-align:top;display:none">
+<tr><td><input type = "radio" name = "immOp1" id = "immDec1" value = "0" 
+ onclick="immDecData(1)" checked = "checked" /><label for = "immDec1">#</label></td><td>
+ <input type="text" id="decText1" style="display:inline"></td></tr>
+<tr><td><input type = "radio" name = "immOp1" id = "immHex1" value = "1" onclick="immHexData(1)" />
+ <label for = "immHex1">#0x</label></td><td><input type="text" id="hexText1" style="display:none">
+ </td></tr>
+<tr><td colspan="2" style="text-align:center"><button onclick="encodeImm(1)" type="button">Encode</button>
+ </td></tr>
+</table>
+<select id="iOp4RegSelect" onChange="opRegSelected( 3, true )" size=16 style="display:none" >
+<option value="0">R0</option> <option value="1">R1</option> <option value="2">R2</option> 
+<option value="3">R3</option> <option value="4">R4</option> <option value="5">R5</option> 
+<option value="6">R6</option> <option value="7">R7</option> <option value="8">R8</option> 
+<option value="9">R9</option> <option value="A">R10</option> <option value="B">R11</option> 
+<option value="C">R12</option> <option value="D">R13</option> <option value="E">R14</option> 
+<option value="F">R15</option> 
+</select>
+<table id="targetTable" style="display:none">
+<tr><td>PC</td><td>0x</td><td><input type="text" id="PCText"></td></tr>
+<tr><td>Target</td><td>0x</td><td><input type="text" id="targetText"></td></tr>
+<tr><td colspan="3" style="text-align:center">
+<button onclick="encodeTarget(1)" type="button">Encode</button></td></tr>
+</table>
+
+</form>
+</div>
+
+<div id="iOp3" style="margin-left:20px;margin-right:20px;float:left;display:none">
+<p id="iOp3P" style="text-align:center;margin-left:20px;margin-right:20px">Operand 3</p>
+<form id="op3Select" > 
+<select id="iOp3RegSelect" onChange="opRegSelected( 2, true )" size=16 style="display:none" >
+<option value="0">R0</option> <option value="1">R1</option> <option value="2">R2</option> 
+<option value="3">R3</option> <option value="4">R4</option> <option value="5">R5</option> 
+<option value="6">R6</option> <option value="7">R7</option> <option value="8">R8</option> 
+<option value="9">R9</option> <option value="A">R10</option> <option value="B">R11</option> 
+<option value="C">R12</option> <option value="D">R13</option> <option value="E">R14</option> 
+<option value="F">R15</option> 
+</select>
+<table id="immTable2" style="display:none">
+<tr><td><input type = "radio" name = "immOp2" id = "immDec2" value = "0" 
+ onclick="immDecData(2)" checked = "checked" /><label for = "immDec2">#</label></td>
+ <td> <input type="text" id="decText2" style="display:inline"></td></tr>
+<tr><td><input type = "radio" name = "immOp2" id = "immHex2" value = "1" 
+ onclick="immHexData(2)" /> <label for = "immHex2">#0x</label></td><td>
+ <input type="text" id="hexText2" style="display:none"></td></tr>
+<tr><td colspan="2" style="text-align:center"> <button onclick="encodeImm(2)" type="button">Encode</button></td></tr>
+</table>
+</form>
+</div>
+
+</div>  <!-- end of iContent div -->
+</fieldset> 
+
+<script language="JavaScript" type="text/javascript">
+initEncoder();
+</script>
+
+</body>
+</html>
